@@ -35,104 +35,51 @@ import static org.apache.iotdb.calc.plan.relational.metadata.CommonMetadataUtils
 
 public abstract class CompareBinaryColumnTransformer extends BinaryColumnTransformer {
 
+  /** How a pair of values is compared, chosen once from the operand types. */
+  private enum ComparisonMode {
+    BINARY,
+    BOOLEAN,
+    // One side is INT64/TIMESTAMP, the other an integer type
+    LONG_LONG,
+    // Left is INT64/TIMESTAMP, right is FLOAT/DOUBLE
+    LONG_DOUBLE,
+    // Left is FLOAT/DOUBLE, right is INT64/TIMESTAMP
+    DOUBLE_LONG,
+    // Every other numeric pair, which a double holds exactly
+    DOUBLE
+  }
+
+  private final Type leftType;
+  private final Type rightType;
+  private final ComparisonMode mode;
+
   protected CompareBinaryColumnTransformer(
       Type returnType, ColumnTransformer leftTransformer, ColumnTransformer rightTransformer) {
     super(returnType, leftTransformer, rightTransformer);
+    this.leftType = leftTransformer.getType();
+    this.rightType = rightTransformer.getType();
+    this.mode = comparisonMode(leftType, rightType);
   }
 
-  @Override
-  protected void doTransform(
-      Column leftColumn, Column rightColumn, ColumnBuilder builder, int positionCount) {
-    // if either column is all null, append nullCount. For now, a RunLengthEncodeColumn with
-    // mayHaveNull == true is all null
-    if ((leftColumn.mayHaveNull() && leftColumn instanceof RunLengthEncodedColumn)
-        || (rightColumn.mayHaveNull() && rightColumn instanceof RunLengthEncodedColumn)) {
-      builder.appendNull(positionCount);
-      return;
+  private static ComparisonMode comparisonMode(Type left, Type right) {
+    if (isCharType(left) || isBlobType(left)) {
+      return ComparisonMode.BINARY;
     }
-    for (int i = 0; i < positionCount; i++) {
-      if (!leftColumn.isNull(i) && !rightColumn.isNull(i)) {
-        evaluateAndTransform(leftColumn, rightColumn, i, builder);
-      } else {
-        builder.appendNull();
-      }
+    if (isBool(left)) {
+      return ComparisonMode.BOOLEAN;
     }
-  }
-
-  @Override
-  protected void doTransform(
-      Column leftColumn,
-      Column rightColumn,
-      ColumnBuilder builder,
-      int positionCount,
-      boolean[] selection) {
-    // if either column is all null, append nullCount. For now, a RunLengthEncodeColumn with
-    // mayHaveNull == true is all null
-    if ((leftColumn.mayHaveNull() && leftColumn instanceof RunLengthEncodedColumn)
-        || (rightColumn.mayHaveNull() && rightColumn instanceof RunLengthEncodedColumn)) {
-      builder.appendNull(positionCount);
-      return;
+    // A double cannot hold every INT64/TIMESTAMP value (Long.MAX_VALUE rounds up to 2^63), so
+    // these are compared without converting the integer side to double.
+    if (isWideInteger(left) && isInteger(right) || isWideInteger(right) && isInteger(left)) {
+      return ComparisonMode.LONG_LONG;
     }
-    for (int i = 0; i < positionCount; i++) {
-      if (selection[i] && !leftColumn.isNull(i) && !rightColumn.isNull(i)) {
-        evaluateAndTransform(leftColumn, rightColumn, i, builder);
-      } else {
-        builder.appendNull();
-      }
+    if (isWideInteger(left) && isFloatingPoint(right)) {
+      return ComparisonMode.LONG_DOUBLE;
     }
-  }
-
-  private void evaluateAndTransform(
-      Column leftColumn, Column rightColumn, int index, ColumnBuilder builder) {
-    boolean flag = false;
-    // compare binary type
-    if (isCharType(leftTransformer.getType()) || isBlobType(leftTransformer.getType())) {
-      flag =
-          transform(
-              CommonTransformUtils.compare(
-                  leftTransformer.getType().getBinary(leftColumn, index),
-                  rightTransformer.getType().getBinary(rightColumn, index)));
-    } else if (isBool(leftTransformer.getType())) {
-      flag =
-          transform(
-              Boolean.compare(
-                  leftTransformer.getType().getBoolean(leftColumn, index),
-                  rightTransformer.getType().getBoolean(rightColumn, index)));
-    } else if (needsExactComparison(leftTransformer.getType(), rightTransformer.getType())) {
-      // A double cannot hold every INT64/TIMESTAMP value (Long.MAX_VALUE rounds up to 2^63), so
-      // these are compared without converting the integer side to double.
-      final Type leftType = leftTransformer.getType();
-      final Type rightType = rightTransformer.getType();
-      if (isFloatingPoint(rightType)) {
-        final double right = rightType.getDouble(rightColumn, index);
-        if (!Double.isNaN(right)) {
-          flag = transform(compareLongToDouble(getLong(leftType, leftColumn, index), right));
-        }
-      } else if (isFloatingPoint(leftType)) {
-        final double left = leftType.getDouble(leftColumn, index);
-        if (!Double.isNaN(left)) {
-          flag = transform(-compareLongToDouble(getLong(rightType, rightColumn, index), left));
-        }
-      } else {
-        flag =
-            transform(
-                Long.compare(
-                    getLong(leftType, leftColumn, index), getLong(rightType, rightColumn, index)));
-      }
-    } else {
-      final double left = leftTransformer.getType().getDouble(leftColumn, index);
-      final double right = rightTransformer.getType().getDouble(rightColumn, index);
-      if (!Double.isNaN(left) && !Double.isNaN(right)) {
-        flag = transform(Double.compare(left, right));
-      }
+    if (isFloatingPoint(left) && isWideInteger(right)) {
+      return ComparisonMode.DOUBLE_LONG;
     }
-    returnType.writeBoolean(builder, flag);
-  }
-
-  /** True when one side is INT64/TIMESTAMP and the other is an integer or floating-point type. */
-  private static boolean needsExactComparison(Type left, Type right) {
-    return (isWideInteger(left) && (isInteger(right) || isFloatingPoint(right)))
-        || (isWideInteger(right) && (isInteger(left) || isFloatingPoint(left)));
+    return ComparisonMode.DOUBLE;
   }
 
   private static boolean isWideInteger(Type type) {
@@ -147,28 +94,172 @@ public abstract class CompareBinaryColumnTransformer extends BinaryColumnTransfo
     return type.getTypeEnum() == TypeEnum.FLOAT || type.getTypeEnum() == TypeEnum.DOUBLE;
   }
 
-  private static long getLong(Type type, Column column, int index) {
-    return type.getTypeEnum() == TypeEnum.INT32
-        ? type.getInt(column, index)
-        : type.getLong(column, index);
+  @Override
+  protected void doTransform(
+      Column leftColumn, Column rightColumn, ColumnBuilder builder, int positionCount) {
+    doTransform(leftColumn, rightColumn, builder, positionCount, null);
   }
 
-  /** Compares a long with a non-NaN double exactly. */
-  private static int compareLongToDouble(long value, double other) {
-    if (other >= 0x1p63) {
-      return -1;
+  /** {@code selection} may be null, which selects every position. */
+  @Override
+  protected void doTransform(
+      Column leftColumn,
+      Column rightColumn,
+      ColumnBuilder builder,
+      int positionCount,
+      boolean[] selection) {
+    // if either column is all null, append nullCount. For now, a RunLengthEncodeColumn with
+    // mayHaveNull == true is all null
+    if ((leftColumn.mayHaveNull() && leftColumn instanceof RunLengthEncodedColumn)
+        || (rightColumn.mayHaveNull() && rightColumn instanceof RunLengthEncodedColumn)) {
+      builder.appendNull(positionCount);
+      return;
     }
-    if (other < -0x1p63) {
-      return 1;
+    // Dispatch once per column rather than once per row
+    switch (mode) {
+      case BINARY:
+        transformBinary(leftColumn, rightColumn, builder, positionCount, selection);
+        break;
+      case BOOLEAN:
+        transformBoolean(leftColumn, rightColumn, builder, positionCount, selection);
+        break;
+      case LONG_LONG:
+        transformLongLong(leftColumn, rightColumn, builder, positionCount, selection);
+        break;
+      case LONG_DOUBLE:
+        transformLongDouble(leftColumn, rightColumn, builder, positionCount, selection);
+        break;
+      case DOUBLE_LONG:
+        transformDoubleLong(leftColumn, rightColumn, builder, positionCount, selection);
+        break;
+      default:
+        transformDouble(leftColumn, rightColumn, builder, positionCount, selection);
+        break;
     }
-    // |other| < 2^63, so the cast is exact truncation toward zero
-    final long truncated = (long) other;
-    if (value != truncated) {
-      return Long.compare(value, truncated);
+  }
+
+  private static boolean isValid(
+      Column leftColumn, Column rightColumn, int index, boolean[] selection) {
+    return (selection == null || selection[index])
+        && !leftColumn.isNull(index)
+        && !rightColumn.isNull(index);
+  }
+
+  private void transformBinary(
+      Column leftColumn,
+      Column rightColumn,
+      ColumnBuilder builder,
+      int positionCount,
+      boolean[] selection) {
+    for (int i = 0; i < positionCount; i++) {
+      if (isValid(leftColumn, rightColumn, i, selection)) {
+        returnType.writeBoolean(
+            builder,
+            transform(
+                CommonTransformUtils.compare(
+                    leftType.getBinary(leftColumn, i), rightType.getBinary(rightColumn, i))));
+      } else {
+        builder.appendNull();
+      }
     }
-    // value equals the integral part of other, so the fractional part decides
-    final double fraction = other - truncated;
-    return fraction > 0 ? -1 : (fraction < 0 ? 1 : 0);
+  }
+
+  private void transformBoolean(
+      Column leftColumn,
+      Column rightColumn,
+      ColumnBuilder builder,
+      int positionCount,
+      boolean[] selection) {
+    for (int i = 0; i < positionCount; i++) {
+      if (isValid(leftColumn, rightColumn, i, selection)) {
+        returnType.writeBoolean(
+            builder,
+            transform(
+                Boolean.compare(
+                    leftType.getBoolean(leftColumn, i), rightType.getBoolean(rightColumn, i))));
+      } else {
+        builder.appendNull();
+      }
+    }
+  }
+
+  private void transformLongLong(
+      Column leftColumn,
+      Column rightColumn,
+      ColumnBuilder builder,
+      int positionCount,
+      boolean[] selection) {
+    for (int i = 0; i < positionCount; i++) {
+      if (isValid(leftColumn, rightColumn, i, selection)) {
+        returnType.writeBoolean(
+            builder,
+            transform(
+                Long.compare(leftType.getLong(leftColumn, i), rightType.getLong(rightColumn, i))));
+      } else {
+        builder.appendNull();
+      }
+    }
+  }
+
+  private void transformLongDouble(
+      Column leftColumn,
+      Column rightColumn,
+      ColumnBuilder builder,
+      int positionCount,
+      boolean[] selection) {
+    for (int i = 0; i < positionCount; i++) {
+      if (isValid(leftColumn, rightColumn, i, selection)) {
+        final double right = rightType.getDouble(rightColumn, i);
+        returnType.writeBoolean(
+            builder,
+            !Double.isNaN(right)
+                && transform(
+                    CommonTransformUtils.compareLongToDouble(
+                        leftType.getLong(leftColumn, i), right)));
+      } else {
+        builder.appendNull();
+      }
+    }
+  }
+
+  private void transformDoubleLong(
+      Column leftColumn,
+      Column rightColumn,
+      ColumnBuilder builder,
+      int positionCount,
+      boolean[] selection) {
+    for (int i = 0; i < positionCount; i++) {
+      if (isValid(leftColumn, rightColumn, i, selection)) {
+        final double left = leftType.getDouble(leftColumn, i);
+        returnType.writeBoolean(
+            builder,
+            !Double.isNaN(left)
+                && transform(
+                    -CommonTransformUtils.compareLongToDouble(
+                        rightType.getLong(rightColumn, i), left)));
+      } else {
+        builder.appendNull();
+      }
+    }
+  }
+
+  private void transformDouble(
+      Column leftColumn,
+      Column rightColumn,
+      ColumnBuilder builder,
+      int positionCount,
+      boolean[] selection) {
+    for (int i = 0; i < positionCount; i++) {
+      if (isValid(leftColumn, rightColumn, i, selection)) {
+        final double left = leftType.getDouble(leftColumn, i);
+        final double right = rightType.getDouble(rightColumn, i);
+        returnType.writeBoolean(
+            builder,
+            !Double.isNaN(left) && !Double.isNaN(right) && transform(Double.compare(left, right)));
+      } else {
+        builder.appendNull();
+      }
+    }
   }
 
   @Override

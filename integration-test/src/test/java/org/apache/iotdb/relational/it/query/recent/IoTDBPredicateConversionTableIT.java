@@ -602,5 +602,18 @@ public class IoTDBPredicateConversionTableIT {
           "1970-01-01T00:00:00.002Z,null_dev,null,"
         },
         DATABASE_NAME);
+
+    // Constant folding must agree with the column transformer
+    String[] constantHeader = {"m"};
+    tableResultSetEqualTest(
+        "SELECT 9223372036854775807 IN (9223372036854775808.0, 0) AS m FROM InListBoundaryTable WHERE device = 'value_dev'",
+        constantHeader,
+        new String[] {"false,"},
+        DATABASE_NAME);
+    tableResultSetEqualTest(
+        "SELECT 9223372036854775807 = 9223372036854775808.0 AS m FROM InListBoundaryTable WHERE device = 'value_dev'",
+        constantHeader,
+        new String[] {"false,"},
+        DATABASE_NAME);
   }
 }

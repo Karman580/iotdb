@@ -38,6 +38,27 @@ public class CommonTransformUtils {
     return first.compareTo(second);
   }
 
+  /**
+   * Compares a long with a non-NaN double exactly, without converting the long to double. A double
+   * cannot hold every long value ((double) Long.MAX_VALUE rounds up to 2^63).
+   */
+  public static int compareLongToDouble(long value, double other) {
+    if (other >= 0x1p63) {
+      return -1;
+    }
+    if (other < -0x1p63) {
+      return 1;
+    }
+    // -2^63 <= other < 2^63, so the cast is exact truncation toward zero
+    final long truncated = (long) other;
+    if (value != truncated) {
+      return Long.compare(value, truncated);
+    }
+    // value equals the integral part of other, so the fractional part decides
+    final double fraction = other - truncated;
+    return fraction > 0 ? -1 : (fraction < 0 ? 1 : 0);
+  }
+
   public static Optional<Character> getEscapeCharacter(String escape) {
     if (escape.length() == 1) {
       return Optional.of(escape.charAt(0));

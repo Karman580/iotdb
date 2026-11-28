@@ -19,6 +19,7 @@
 
 package org.apache.iotdb.db.queryengine.transformation.dag.column.binary;
 
+import org.apache.iotdb.calc.transformation.dag.column.ColumnTransformer;
 import org.apache.iotdb.calc.transformation.dag.column.binary.ArithmeticAdditionColumnTransformer;
 import org.apache.iotdb.calc.transformation.dag.column.binary.ArithmeticDivisionColumnTransformer;
 import org.apache.iotdb.calc.transformation.dag.column.binary.ArithmeticModuloColumnTransformer;
@@ -29,6 +30,7 @@ import org.apache.iotdb.calc.transformation.dag.column.binary.CompareEqualToColu
 import org.apache.iotdb.calc.transformation.dag.column.binary.CompareGreaterEqualColumnTransformer;
 import org.apache.iotdb.calc.transformation.dag.column.binary.CompareGreaterThanColumnTransformer;
 import org.apache.iotdb.calc.transformation.dag.column.binary.CompareLessEqualColumnTransformer;
+import org.apache.iotdb.calc.transformation.dag.column.binary.CompareLessThanColumnTransformer;
 import org.apache.iotdb.calc.transformation.dag.column.binary.CompareNonEqualColumnTransformer;
 import org.apache.iotdb.calc.transformation.dag.column.leaf.IdentityColumnTransformer;
 
@@ -45,6 +47,7 @@ import org.junit.Before;
 import org.junit.Test;
 
 import java.util.Arrays;
+import java.util.function.IntPredicate;
 
 public class ArithmeticAndCompareBinaryColumnTransformerTest {
 
@@ -254,6 +257,232 @@ public class ArithmeticAndCompareBinaryColumnTransformerTest {
     Assert.assertFalse(res.getBoolean(1));
     Assert.assertTrue(res.getBoolean(2));
     Assert.assertFalse(res.getBoolean(3));
+  }
+
+  @Test
+  public void testInt64AndDoubleComparisonEdgeCases() {
+    double belowTwoTo63 = Math.nextDown(0x1p63); // 9223372036854774784.0
+    Number[] longs = {
+      0L,
+      -1L,
+      -2L,
+      0L,
+      0L,
+      Long.MAX_VALUE,
+      Long.MIN_VALUE,
+      9223372036854774784L,
+      9223372036854774785L,
+      9223372036854774783L
+    };
+    Number[] doubles = {
+      -0.5,
+      -1.5,
+      -1.5,
+      -0.0,
+      Double.NaN,
+      Double.POSITIVE_INFINITY,
+      Double.NEGATIVE_INFINITY,
+      belowTwoTo63,
+      belowTwoTo63,
+      belowTwoTo63
+    };
+    // Sign of long compared with double; null means NaN, where every comparison is false
+    Integer[] expected = {1, 1, -1, 0, null, -1, 1, 0, 1, -1};
+    assertComparisons(TSDataType.INT64, longs, TSDataType.DOUBLE, doubles, expected);
+    assertComparisons(TSDataType.DOUBLE, doubles, TSDataType.INT64, longs, negate(expected));
+  }
+
+  @Test
+  public void testInt64ComparedWithOtherNumericTypes() {
+    // INT64 vs FLOAT
+    Number[] longs = {Long.MAX_VALUE, Long.MIN_VALUE, 1L, 16777217L};
+    Number[] floats = {0x1p63f, -0x1p63f, 1.5f, 16777216f};
+    Integer[] expected = {-1, 0, -1, 1};
+    assertComparisons(TSDataType.INT64, longs, TSDataType.FLOAT, floats, expected);
+    assertComparisons(TSDataType.FLOAT, floats, TSDataType.INT64, longs, negate(expected));
+
+    // INT64 vs INT32
+    Number[] wide = {Long.MAX_VALUE, 2147483648L, -2147483649L, 5L};
+    Number[] ints = {Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MIN_VALUE, 5};
+    expected = new Integer[] {1, 1, -1, 0};
+    assertComparisons(TSDataType.INT64, wide, TSDataType.INT32, ints, expected);
+    assertComparisons(TSDataType.INT32, ints, TSDataType.INT64, wide, negate(expected));
+
+    // TIMESTAMP vs DOUBLE and TIMESTAMP vs INT64
+    Number[] timestamps = {Long.MAX_VALUE, Long.MAX_VALUE - 1, 9007199254740993L};
+    assertComparisons(
+        TSDataType.TIMESTAMP,
+        timestamps,
+        TSDataType.DOUBLE,
+        new Number[] {0x1p63, 0x1p63, 9007199254740992.0},
+        new Integer[] {-1, -1, 1});
+    assertComparisons(
+        TSDataType.TIMESTAMP,
+        timestamps,
+        TSDataType.INT64,
+        new Number[] {Long.MAX_VALUE - 1, Long.MAX_VALUE, 9007199254740993L},
+        new Integer[] {1, -1, 0});
+  }
+
+  @Test
+  public void testComparisonWithSelection() {
+    boolean[] selection = {true, false, true};
+    TsBlock tsBlock =
+        buildBlock(
+            TSDataType.INT64,
+            new Number[] {Long.MAX_VALUE, 1L, 2L},
+            TSDataType.DOUBLE,
+            new Number[] {0x1p63, 1.0, 2.0});
+    Column res =
+        evaluate(
+            CompareEqualToColumnTransformer::new,
+            tsBlock,
+            TSDataType.INT64,
+            TSDataType.DOUBLE,
+            selection);
+    Assert.assertFalse(res.getBoolean(0));
+    Assert.assertTrue(res.isNull(1));
+    Assert.assertTrue(res.getBoolean(2));
+
+    tsBlock =
+        buildBlock(
+            TSDataType.INT32, new Number[] {1, 2, 3}, TSDataType.INT32, new Number[] {1, 2, 4});
+    res =
+        evaluate(
+            CompareLessThanColumnTransformer::new,
+            tsBlock,
+            TSDataType.INT32,
+            TSDataType.INT32,
+            selection);
+    Assert.assertFalse(res.getBoolean(0));
+    Assert.assertTrue(res.isNull(1));
+    Assert.assertTrue(res.getBoolean(2));
+  }
+
+  private interface CompareFactory {
+    BinaryColumnTransformer create(
+        Type returnType, ColumnTransformer leftTransformer, ColumnTransformer rightTransformer);
+  }
+
+  /**
+   * Checks every comparison operator. {@code expected[i]} is the sign of {@code left[i]} compared
+   * with {@code right[i]}, or null when every comparison must be false.
+   */
+  private static void assertComparisons(
+      TSDataType leftType,
+      Number[] left,
+      TSDataType rightType,
+      Number[] right,
+      Integer[] expected) {
+    TsBlock tsBlock = buildBlock(leftType, left, rightType, right);
+    assertOperator(
+        CompareEqualToColumnTransformer::new, s -> s == 0, tsBlock, leftType, rightType, expected);
+    assertOperator(
+        CompareNonEqualColumnTransformer::new, s -> s != 0, tsBlock, leftType, rightType, expected);
+    assertOperator(
+        CompareGreaterThanColumnTransformer::new,
+        s -> s > 0,
+        tsBlock,
+        leftType,
+        rightType,
+        expected);
+    assertOperator(
+        CompareGreaterEqualColumnTransformer::new,
+        s -> s >= 0,
+        tsBlock,
+        leftType,
+        rightType,
+        expected);
+    assertOperator(
+        CompareLessThanColumnTransformer::new, s -> s < 0, tsBlock, leftType, rightType, expected);
+    assertOperator(
+        CompareLessEqualColumnTransformer::new,
+        s -> s <= 0,
+        tsBlock,
+        leftType,
+        rightType,
+        expected);
+  }
+
+  private static void assertOperator(
+      CompareFactory factory,
+      IntPredicate operator,
+      TsBlock tsBlock,
+      TSDataType leftType,
+      TSDataType rightType,
+      Integer[] expected) {
+    Column res = evaluate(factory, tsBlock, leftType, rightType, null);
+    Assert.assertEquals(expected.length, res.getPositionCount());
+    for (int i = 0; i < expected.length; i++) {
+      Assert.assertEquals(
+          factory.getClass() + " row " + i,
+          expected[i] != null && operator.test(expected[i]),
+          res.getBoolean(i));
+    }
+  }
+
+  private static Integer[] negate(Integer[] signs) {
+    Integer[] negated = new Integer[signs.length];
+    for (int i = 0; i < signs.length; i++) {
+      negated[i] = signs[i] == null ? null : -signs[i];
+    }
+    return negated;
+  }
+
+  private static TsBlock buildBlock(
+      TSDataType leftType, Number[] left, TSDataType rightType, Number[] right) {
+    TsBlockBuilder builder = new TsBlockBuilder(left.length, Arrays.asList(leftType, rightType));
+    for (int i = 0; i < left.length; i++) {
+      builder.getTimeColumnBuilder().writeLong(i);
+      write(builder.getColumnBuilder(0), leftType, left[i]);
+      write(builder.getColumnBuilder(1), rightType, right[i]);
+      builder.declarePosition();
+    }
+    return builder.build();
+  }
+
+  private static void write(ColumnBuilder builder, TSDataType type, Number value) {
+    switch (type) {
+      case INT32:
+        builder.writeInt(value.intValue());
+        break;
+      case INT64:
+      case TIMESTAMP:
+        builder.writeLong(value.longValue());
+        break;
+      case FLOAT:
+        builder.writeFloat(value.floatValue());
+        break;
+      case DOUBLE:
+        builder.writeDouble(value.doubleValue());
+        break;
+      default:
+        throw new IllegalArgumentException(type.toString());
+    }
+  }
+
+  private static Column evaluate(
+      CompareFactory factory,
+      TsBlock tsBlock,
+      TSDataType leftType,
+      TSDataType rightType,
+      boolean[] selection) {
+    IdentityColumnTransformer left =
+        new IdentityColumnTransformer(TypeFactory.getType(leftType), 0);
+    IdentityColumnTransformer right =
+        new IdentityColumnTransformer(TypeFactory.getType(rightType), 1);
+    left.addReferenceCount();
+    right.addReferenceCount();
+    left.initFromTsBlock(tsBlock);
+    right.initFromTsBlock(tsBlock);
+    BinaryColumnTransformer transformer = factory.create(booleanType, left, right);
+    transformer.addReferenceCount();
+    if (selection == null) {
+      transformer.evaluate();
+    } else {
+      transformer.evaluateWithSelection(selection);
+    }
+    return transformer.getColumn();
   }
 
   private static Column evaluateComparison(

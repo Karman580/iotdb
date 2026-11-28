@@ -144,6 +144,10 @@ public class ConvertPredicateToFilterVisitor
       // column transformer.
       return new FalseLiteralFilter();
     }
+    if (inSet.size() == 1) {
+      // Dropping literals left a single value, so use "=" like a single-value IN does
+      return ValueFilterApi.eq(measurementIndex, inSet.iterator().next(), dataType);
+    }
     return ValueFilterApi.in(measurementIndex, inSet, dataType);
   }
 

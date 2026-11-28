@@ -78,6 +78,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static java.util.Objects.requireNonNull;
 import static org.apache.iotdb.calc.transformation.dag.column.unary.scalar.ExtractTransformer.constructEvaluateFunction;
+import static org.apache.iotdb.calc.transformation.dag.util.CommonTransformUtils.compareLongToDouble;
 import static org.apache.iotdb.commons.queryengine.plan.relational.sql.ast.ArithmeticUnaryExpression.Sign.MINUS;
 import static org.apache.iotdb.commons.queryengine.plan.relational.sql.ast.ArithmeticUnaryExpression.Sign.PLUS;
 import static org.apache.iotdb.commons.queryengine.plan.relational.type.TypeSignatureTranslator.toTypeSignature;
@@ -1069,13 +1070,20 @@ public class IrExpressionInterpreter {
       if (Double.isNaN(left.doubleValue()) || Double.isNaN(right.doubleValue())) {
         return false;
       }
-      int comparison =
-          (left instanceof Float
-                  || left instanceof Double
-                  || right instanceof Float
-                  || right instanceof Double)
-              ? Double.compare(left.doubleValue(), right.doubleValue())
-              : Long.compare(left.longValue(), right.longValue());
+      boolean leftIsFloatingPoint = left instanceof Float || left instanceof Double;
+      boolean rightIsFloatingPoint = right instanceof Float || right instanceof Double;
+      int comparison;
+      // A double cannot hold every long (Long.MAX_VALUE rounds up to 2^63), so compare a long with
+      // a floating-point value exactly, the same way CompareBinaryColumnTransformer does.
+      if (left instanceof Long && rightIsFloatingPoint) {
+        comparison = compareLongToDouble(left.longValue(), right.doubleValue());
+      } else if (leftIsFloatingPoint && right instanceof Long) {
+        comparison = -compareLongToDouble(right.longValue(), left.doubleValue());
+      } else if (leftIsFloatingPoint || rightIsFloatingPoint) {
+        comparison = Double.compare(left.doubleValue(), right.doubleValue());
+      } else {
+        comparison = Long.compare(left.longValue(), right.longValue());
+      }
       switch (operator) {
         case LESS_THAN:
           return comparison < 0;

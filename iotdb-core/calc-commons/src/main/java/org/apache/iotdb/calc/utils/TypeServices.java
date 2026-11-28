@@ -171,6 +171,7 @@ import java.util.function.IntUnaryOperator;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static org.apache.iotdb.calc.transformation.datastructure.util.BinaryUtils.MIN_ARRAY_HEADER_SIZE;
 import static org.apache.iotdb.calc.transformation.datastructure.util.BinaryUtils.MIN_OBJECT_HEADER_SIZE;
 
@@ -192,6 +193,10 @@ public class TypeServices {
    * how {@code =} treats such literals.
    */
   public static Long getIntegralInListValue(final Literal value, final Type type) {
+    checkArgument(
+        type.getTypeEnum() == TypeEnum.INT32 || type.getTypeEnum() == TypeEnum.INT64,
+        CalcMessages.EXCEPTION_EXPECTED_INT32_OR_INT64_TYPE_BUT_GOT_ARG_4E713BC4,
+        type.getTypeEnum());
     final boolean isInt32 = type.getTypeEnum() == TypeEnum.INT32;
     final long min = isInt32 ? Integer.MIN_VALUE : Long.MIN_VALUE;
     final long max = isInt32 ? Integer.MAX_VALUE : Long.MAX_VALUE;

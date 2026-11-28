@@ -610,4 +610,7 @@ public final class CalcMessages {
 
   public static final String EXCEPTION_SCALAR_SUB_QUERY_DOES_NOT_HAVE_OUTPUT_E64DBE29 =
       "标量子查询没有输出。";
+
+  public static final String EXCEPTION_EXPECTED_INT32_OR_INT64_TYPE_BUT_GOT_ARG_4E713BC4 =
+      "期望 INT32 或 INT64 类型，实际为 %s";
 }

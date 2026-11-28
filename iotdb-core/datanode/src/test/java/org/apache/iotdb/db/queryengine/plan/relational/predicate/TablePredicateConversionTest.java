@@ -28,7 +28,6 @@ import org.apache.iotdb.commons.queryengine.plan.relational.sql.ast.InListExpres
 import org.apache.iotdb.commons.queryengine.plan.relational.sql.ast.InPredicate;
 import org.apache.iotdb.commons.queryengine.plan.relational.sql.ast.Literal;
 import org.apache.iotdb.commons.queryengine.plan.relational.sql.ast.LongLiteral;
-import org.apache.iotdb.commons.queryengine.plan.relational.sql.ast.NotExpression;
 import org.apache.iotdb.commons.queryengine.plan.relational.sql.ast.SymbolReference;
 import org.apache.iotdb.db.queryengine.plan.analyze.PredicateUtils;
 
@@ -527,11 +526,12 @@ public class TablePredicateConversionTest {
     Assert.assertFalse(filter.satisfyInteger(0, 2));
     Assert.assertFalse(filter.satisfyInteger(0, Integer.MIN_VALUE));
 
-    // NOT IN keeps rows whose value would have been hit by a narrowed literal
-    Filter notInFilter =
-        convertInt32(new NotExpression(inPredicate(int32Column, "1", "4294967298")));
-    Assert.assertFalse(notInFilter.satisfyInteger(0, 1));
-    Assert.assertTrue(notInFilter.satisfyInteger(0, 2));
+    // Only one literal can match, so the filter is the same "=" a single-value IN produces.
+    // NOT IN is not covered here: a NotExpression is never pushed into the scan, so the real
+    // NOT IN path is the column transformer, which IoTDBPredicateConversionTableIT covers.
+    Assert.assertEquals(
+        ValueFilterApi.eq(0, 1, TSDataType.INT32),
+        convertInt32(inPredicate(int32Column, "1", "4294967298", "2.5")));
 
     // No literal can match. The result must be FalseLiteralFilter rather than an empty ValueIn:
     // TsFile reports allSatisfy() for an empty candidate set on an all-NULL page, which would
@@ -539,10 +539,6 @@ public class TablePredicateConversionTest {
     Filter impossible = convertInt32(inPredicate(int32Column, "4294967298", "2.5"));
     Assert.assertEquals(new FalseLiteralFilter(), impossible);
     Assert.assertFalse(impossible.satisfyInteger(0, 2));
-    Filter notImpossible =
-        convertInt32(new NotExpression(inPredicate(int32Column, "4294967298", "2.5")));
-    Assert.assertTrue(notImpossible.satisfyInteger(0, 2));
-    Assert.assertTrue(notImpossible.satisfyInteger(0, Integer.MIN_VALUE));
   }
 
   @Test

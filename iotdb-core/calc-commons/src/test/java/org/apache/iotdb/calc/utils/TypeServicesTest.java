@@ -40,6 +40,7 @@ import org.apache.tsfile.read.common.block.column.FloatColumn;
 import org.apache.tsfile.read.common.block.column.IntColumn;
 import org.apache.tsfile.read.common.block.column.LongColumn;
 import org.apache.tsfile.read.common.block.column.TimeColumn;
+import org.apache.tsfile.read.common.type.DoubleType;
 import org.apache.tsfile.read.common.type.IntType;
 import org.apache.tsfile.read.common.type.LongType;
 import org.apache.tsfile.read.common.type.Type;
@@ -93,6 +94,10 @@ public class TypeServicesTest {
     assertThrows(
         SemanticException.class,
         () -> TypeServices.getIntegralInListValue(new StringLiteral("2"), IntType.INT32));
+    // Only INT32 and INT64 columns are accepted; other types are not treated as INT64
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> TypeServices.getIntegralInListValue(new LongLiteral("2"), DoubleType.DOUBLE));
   }
 
   private static Long integralInListValue(String literal, Type type) {
